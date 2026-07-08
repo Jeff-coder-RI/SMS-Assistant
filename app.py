@@ -13,12 +13,12 @@ import json
 import logging
 from datetime import datetime
 
+import requests as http
 from flask import Flask, request, Response
 from werkzeug.middleware.proxy_fix import ProxyFix
 from twilio.twiml.messaging_response import MessagingResponse
 from twilio.request_validator import RequestValidator
 import anthropic
-from pyairtable import Api
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -37,10 +37,33 @@ logger = logging.getLogger(__name__)
 
 # ── Clients ───────────────────────────────────────────────────────────────────
 claude = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
-airtable = Api(AIRTABLE_API_KEY)
 
-def table(name: str):
-    return airtable.table(AIRTABLE_BASE_ID, name)
+AIRTABLE_BASE_URL = f"https://api.airtable.com/v0/{AIRTABLE_BASE_ID}"
+AIRTABLE_HEADERS = {
+    "Authorization": f"Bearer {AIRTABLE_API_KEY}",
+    "Content-Type": "application/json",
+}
+
+def airtable_create(table_name: str, fields: dict):
+    url = f"{AIRTABLE_BASE_URL}/{http.utils.quote(table_name)}"
+    resp = http.post(url, headers=AIRTABLE_HEADERS, json={"fields": fields})
+    resp.raise_for_status()
+    return resp.json()
+
+def airtable_list(table_name: str, formula: str = None) -> list:
+    url = f"{AIRTABLE_BASE_URL}/{http.utils.quote(table_name)}"
+    params = {}
+    if formula:
+        params["filterByFormula"] = formula
+    resp = http.get(url, headers=AIRTABLE_HEADERS, params=params)
+    resp.raise_for_status()
+    return resp.json().get("records", [])
+
+def airtable_update(table_name: str, record_id: str, fields: dict):
+    url = f"{AIRTABLE_BASE_URL}/{http.utils.quote(table_name)}/{record_id}"
+    resp = http.patch(url, headers=AIRTABLE_HEADERS, json={"fields": fields})
+    resp.raise_for_status()
+    return resp.json()
 
 # ── Claude parser ─────────────────────────────────────────────────────────────
 SYSTEM_PROMPT = """You are an assistant that parses short text messages and extracts structured data.
@@ -92,7 +115,7 @@ def parse_message(text: str) -> dict:
 # ── Airtable helpers ──────────────────────────────────────────────────────────
 def mark_task_done(hint: str) -> str:
     """Find the best-matching open task and mark it Done."""
-    records = table("Tasks").all(formula="({Status}='Open')")
+    records = airtable_list("Tasks", formula="({Status}='Open')")
     if not records:
         return "No open tasks found."
 
@@ -110,7 +133,7 @@ def mark_task_done(hint: str) -> str:
     if not best_record or best_score == 0:
         return f"Couldn't find a matching open task for: \"{hint}\""
 
-    table("Tasks").update(best_record["id"], {"Status": "Done"})
+    airtable_update("Tasks", best_record["id"], {"Status": "Done"})
     task_name = best_record["fields"].get("Task", "that task")
     return f"Marked done: \"{task_name}\""
 
@@ -118,7 +141,7 @@ def build_query_reply(query_type: str) -> str:
     parts = []
 
     if query_type in ("tasks", "all"):
-        records = table("Tasks").all(formula="({Status}='Open')")
+        records = airtable_list("Tasks", formula="({Status}='Open')")
         if records:
             tasks = [r["fields"].get("Task", "") for r in records[-10:]]
             parts.append("OPEN TASKS:\n" + "\n".join(f"• {t}" for t in tasks))
@@ -126,7 +149,7 @@ def build_query_reply(query_type: str) -> str:
             parts.append("No open tasks.")
 
     if query_type in ("expenses", "all"):
-        records = table("Expenses").all()
+        records = airtable_list("Expenses")
         if records:
             recent = records[-5:]
             total = sum(float(r["fields"].get("Amount", 0)) for r in recent)
@@ -139,7 +162,7 @@ def build_query_reply(query_type: str) -> str:
             parts.append("No expenses logged.")
 
     if query_type in ("notes", "all"):
-        records = table("Notes").all()
+        records = airtable_list("Notes")
         if records:
             recent = [r["fields"].get("Note", "") for r in records[-5:]]
             parts.append("RECENT NOTES:\n" + "\n".join(f"• {n}" for n in recent))
@@ -184,7 +207,7 @@ def sms_webhook():
         logger.info(f"Writing to Airtable as type: {msg_type}")
 
         if msg_type == "task":
-            table("Tasks").create({
+            airtable_create("Tasks", {
                 "Date": now,
                 "Task": parsed["task"],
                 "Status": "Open",
@@ -193,7 +216,7 @@ def sms_webhook():
             reply = parsed.get("reply", "Task added!")
 
         elif msg_type == "note":
-            table("Notes").create({
+            airtable_create("Notes", {
                 "Date": now,
                 "Note": parsed["note"],
                 "Tags": parsed.get("tags", ""),
@@ -202,7 +225,7 @@ def sms_webhook():
             reply = parsed.get("reply", "Note saved!")
 
         elif msg_type == "expense":
-            table("Expenses").create({
+            airtable_create("Expenses", {
                 "Date": now,
                 "Amount": float(parsed.get("amount", 0)),
                 "Category": parsed.get("category", "Other"),
