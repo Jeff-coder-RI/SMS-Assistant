@@ -14,6 +14,7 @@ import logging
 from datetime import datetime
 
 from flask import Flask, request, Response
+from werkzeug.middleware.proxy_fix import ProxyFix
 from twilio.twiml.messaging_response import MessagingResponse
 from twilio.request_validator import RequestValidator
 import anthropic
@@ -30,6 +31,7 @@ AIRTABLE_BASE_ID  = os.environ["AIRTABLE_BASE_ID"]
 YOUR_PHONE_NUMBER = os.environ.get("YOUR_PHONE_NUMBER", "")  # optional allowlist
 
 app = Flask(__name__)
+app.wsgi_app = ProxyFix(app.wsgi_app, x_proto=1, x_host=1)
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
