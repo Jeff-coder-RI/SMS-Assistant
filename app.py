@@ -80,6 +80,13 @@ def parse_message(text: str) -> dict:
         messages=[{"role": "user", "content": text}],
     )
     raw = response.content[0].text.strip()
+    logger.info(f"Claude raw response: {raw!r}")
+    # Extract JSON if Claude wrapped it in markdown code fences
+    if "```" in raw:
+        raw = raw.split("```")[1]
+        if raw.startswith("json"):
+            raw = raw[4:]
+        raw = raw.strip()
     return json.loads(raw)
 
 # ── Airtable helpers ──────────────────────────────────────────────────────────
@@ -157,13 +164,16 @@ def sms_webhook():
 
     # Optional: only accept texts from your own number
     if YOUR_PHONE_NUMBER and sender != YOUR_PHONE_NUMBER:
+        logger.warning(f"Rejected sender {sender} (expected {YOUR_PHONE_NUMBER})")
         return _reply("Sorry, I only accept messages from the registered number.")
 
     if not body:
         return _reply("I didn't catch that — try again!")
 
+    logger.info("Calling Claude to parse message...")
     try:
         parsed = parse_message(body)
+        logger.info(f"Claude parsed: {parsed}")
     except Exception as e:
         logger.error(f"Parse error: {e}")
         return _reply("Hmm, I had trouble understanding that. Try rephrasing!")
@@ -171,6 +181,7 @@ def sms_webhook():
     try:
         now = datetime.now().strftime("%Y-%m-%d %H:%M")
         msg_type = parsed.get("type")
+        logger.info(f"Writing to Airtable as type: {msg_type}")
 
         if msg_type == "task":
             table("Tasks").create({
