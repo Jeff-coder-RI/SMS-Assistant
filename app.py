@@ -73,7 +73,8 @@ Classify the message into exactly one category:
   - task     : something to do or follow up on
   - note     : a general note, idea, or piece of information
   - expense  : money spent (look for dollar amounts, "spent", "paid", "cost", "receipt", etc.)
-  - query    : the user is asking for a summary or list (e.g. "what are my tasks?", "show expenses")
+  - hours    : logging billable hours for a client (look for "hours", "add X hours", "log X hours", "X hrs")
+  - query    : the user is asking for a summary or list (e.g. "what are my tasks?", "show expenses", "hours for Falls Creek")
   - done     : the user is marking a task complete (e.g. "done: call Mike", "finished the Johnson return")
 
 Respond ONLY with valid JSON matching this schema:
@@ -87,13 +88,16 @@ For note:
 For expense:
 {"type":"expense","amount":"<number only, e.g. 42.50>","category":"<best guess: Meals, Travel, Office, Software, Professional, Other>","description":"<brief description>","reply":"Expense logged: $<amount> for <description>."}
 
+For hours:
+{"type":"hours","client":"<client name>","hours":"<number only, e.g. 2.5>","month":"<month and year, e.g. July 2026>","description":"<optional extra detail or empty string>","reply":"Logged <hours> hrs for <client> (<month>)."}
+
 For query:
-{"type":"query","query_type":"<tasks|notes|expenses|all>","reply":"<leave empty, will be filled>"}
+{"type":"query","query_type":"<tasks|notes|expenses|hours|all>","client_filter":"<client name if asking about a specific client, else empty string>","reply":"<leave empty, will be filled>"}
 
 For done:
 {"type":"done","task_hint":"<the task they completed>","reply":"<leave empty, will be filled>"}
 
-Be concise. Infer amounts and categories intelligently. If a message mentions a client name, include it in the task/note/description."""
+Be concise. Infer amounts, hours, and categories intelligently. If a message mentions a client name, include it in the relevant field."""
 
 def parse_message(text: str) -> dict:
     response = claude.messages.create(
@@ -137,7 +141,7 @@ def mark_task_done(hint: str) -> str:
     task_name = best_record["fields"].get("Task", "that task")
     return f"Marked done: \"{task_name}\""
 
-def build_query_reply(query_type: str) -> str:
+def build_query_reply(query_type: str, client_filter: str = "") -> str:
     parts = []
 
     if query_type in ("tasks", "all"):
@@ -168,6 +172,28 @@ def build_query_reply(query_type: str) -> str:
             parts.append("RECENT NOTES:\n" + "\n".join(f"• {n}" for n in recent))
         else:
             parts.append("No notes yet.")
+
+    if query_type in ("hours", "all"):
+        records = airtable_list("Hours")
+        if records:
+            # Filter by client if specified
+            if client_filter:
+                cf = client_filter.lower()
+                records = [r for r in records if cf in r["fields"].get("Client", "").lower()]
+            if records:
+                # Group by client and sum hours
+                totals: dict = {}
+                for r in records:
+                    client = r["fields"].get("Client", "Unknown")
+                    hrs = float(r["fields"].get("Hours", 0))
+                    totals[client] = totals.get(client, 0) + hrs
+                lines = [f"• {c}: {h:.1f} hrs" for c, h in sorted(totals.items())]
+                header = f"HOURS{' for ' + client_filter if client_filter else ' BY CLIENT'}:"
+                parts.append(header + "\n" + "\n".join(lines))
+            else:
+                parts.append(f"No hours logged for {client_filter}.")
+        else:
+            parts.append("No hours logged yet.")
 
     return "\n\n".join(parts) if parts else "Nothing logged yet."
 
@@ -234,8 +260,19 @@ def sms_webhook():
             })
             reply = parsed.get("reply", "Expense logged!")
 
+        elif msg_type == "hours":
+            airtable_create("Hours", {
+                "Date": now,
+                "Client": parsed.get("client", ""),
+                "Hours": float(parsed.get("hours", 0)),
+                "Month": parsed.get("month", ""),
+                "Description": parsed.get("description", ""),
+                "Original Message": body,
+            })
+            reply = parsed.get("reply", "Hours logged!")
+
         elif msg_type == "query":
-            reply = build_query_reply(parsed.get("query_type", "all"))
+            reply = build_query_reply(parsed.get("query_type", "all"), parsed.get("client_filter", ""))
 
         elif msg_type == "done":
             reply = mark_task_done(parsed.get("task_hint", ""))
